@@ -1,44 +1,25 @@
-console.log("MMORPG Server Booting (Final Stable Core)...");
+console.log("MMORPG Server Booting (Final Character System Build)...");
 
 const WebSocket = require("ws");
 
+const config = require("./config");
+const World = require("./world");
+const PlayerManager = require("./playerManager");
+const Packet = require("./packet");
+
 const wss = new WebSocket.Server({ port: 3000 });
 
-let players = {};
-let nextId = 1;
-
-const TICK_RATE = 50;
-
-// -------------------------
-// CONNECTION
-// -------------------------
+// ---------------- CONNECTION ----------------
 wss.on("connection", (ws) => {
-    const id = nextId++;
-
-    players[id] = {
-        id,
-        x: 100,
-        y: 100,
-        hp: 100,
-        input: {},
-        lastSeen: Date.now(),
-        ws,
-        alive: true
-    };
+    const player = PlayerManager.createPlayer(ws);
 
     ws.isAlive = true;
 
     ws.on("message", (msg) => {
         try {
             const data = JSON.parse(msg);
-
-            if (players[id]) {
-                players[id].input = data;
-                players[id].lastSeen = Date.now();
-            }
-        } catch (e) {
-            // ignore corrupted packets
-        }
+            PlayerManager.updateInput(player.id, data);
+        } catch (e) {}
     });
 
     ws.on("pong", () => {
@@ -46,59 +27,22 @@ wss.on("connection", (ws) => {
     });
 
     ws.on("close", () => {
-        delete players[id];
+        PlayerManager.removePlayer(player.id);
     });
 });
 
-// -------------------------
-// GAME LOOP (WORLD SIMULATION)
-// -------------------------
+// ---------------- GAME LOOP ----------------
 setInterval(() => {
-    const now = Date.now();
+    World.tick();
+}, config.TICK_RATE);
 
-    for (let id in players) {
-        const p = players[id];
-        const input = p.input || {};
-
-        const speed = 2;
-
-        if (input.up) p.y -= speed;
-        if (input.down) p.y += speed;
-        if (input.left) p.x -= speed;
-        if (input.right) p.x += speed;
-
-        // world bounds
-        p.x = Math.max(0, Math.min(2000, p.x));
-        p.y = Math.max(0, Math.min(2000, p.y));
-
-        // timeout cleanup
-        if (now - p.lastSeen > 30000) {
-            delete players[id];
-        }
-    }
-
-}, TICK_RATE);
-
-// -------------------------
-// BROADCAST SYSTEM (SYNC)
-// -------------------------
+// ---------------- BROADCAST ----------------
 setInterval(() => {
-    const snapshot = [];
+    const packet = Packet.createSync(
+        PlayerManager.getSnapshot()
+    );
 
-    for (let id in players) {
-        const p = players[id];
-        snapshot.push({
-            id: p.id,
-            x: Math.floor(p.x),
-            y: Math.floor(p.y),
-            hp: p.hp
-        });
-    }
-
-    const packet = JSON.stringify({
-        type: "sync",
-        players: snapshot
-    });
+    const players = PlayerManager.getPlayers();
 
     for (let id in players) {
         const p = players[id];
@@ -110,20 +54,18 @@ setInterval(() => {
         }
     }
 
-}, TICK_RATE);
+}, config.BROADCAST_RATE);
 
-// -------------------------
-// HEARTBEAT (ANTI-DESYNC)
-// -------------------------
+// ---------------- HEARTBEAT ----------------
 setInterval(() => {
+    const players = PlayerManager.getPlayers();
+
     for (let id in players) {
         const p = players[id];
 
         if (!p.ws.isAlive) {
-            try {
-                p.ws.terminate();
-            } catch (e) {}
-            delete players[id];
+            p.ws.terminate();
+            PlayerManager.removePlayer(id);
             continue;
         }
 
